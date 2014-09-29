@@ -75,7 +75,6 @@ void usage(){
 	fprintf(stderr, "\t\t\tThe default is to copy the execute environment verbatim, with the exception of the '_' KEY.\n");
 	fprintf(stderr, "\t-a\tAdd KEY to the mimic environment with associated VALUE.\n");
 	fprintf(stderr, "\t\t\tThis will override an existing KEY. Intended to be invoked multiple times for multiple KEYs.\n");
-	fprintf(stderr, "\t-d\tDelete KEY from the mimic environment.\n");
 
 	exit(-1);
 }

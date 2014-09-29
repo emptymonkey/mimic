@@ -105,7 +105,7 @@ void usage(){
  *				We must now set up the child's internal state so it doesn't deceive itself.
  *			* The parent will request memory in the remote process.
  *			* The parent will set up that region of memory to hold the execution headers, as you would find at the base
- *				of the stack, consisting of argv, envp, and a NULL auxv.)
+ *				of the stack, consisting of argv, envp, and a NULL auxv.
  *			* The parent will set up some remaining state in the child and detach.
  *
  *	Good-bye and have a good-luck! :)

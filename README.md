@@ -1,4 +1,4 @@
 mimic
 =====
 
-Launch one process, but make it look like another.
+Liar, liar, /proc on fire!

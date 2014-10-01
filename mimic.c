@@ -13,9 +13,9 @@
  *
  *	This tool runs in user-space and requires *no* elevated privileges. 
  *
- *	This tool allows a user to run any program and have it appear in the process listings as any other program. 
- *	It works by altering the internal process structures in a way to confuse the /proc/PID filesystem. Tools that 
- *	report process details gather that information from the /proc/PID entry for that process.
+ *	This tool allows a user to run any daemon style program and have it appear in the process listings as any other
+ *	program. It works by altering the internal process structures in a way to confuse the /proc/PID filesystem. Tools
+ *	that report process details gather that information from the /proc/PID entry for that process.
  *
  *
  *	Features:
@@ -30,6 +30,7 @@
  *		* Fix the libc extern **environ reference.
  *		* Add /proc/PID/exe support (though this will likely only be usable as root.)
  *		* Add support for remapping the internal memory of the process so that /proc/PID/maps is of no help.
+ *		* Examine full_name vs short_name in /proc/PID/stat and others.
  *
  **********************************************************************************************************************/
 
@@ -68,7 +69,7 @@ int get_vector_byte_count(char **argv);
 
 void usage(){
 
-	fprintf(stderr, "usage: %s -e EXECUTE -m MIMIC [-w] [-a KEY=VALUE] [-d KEY]\n", program_invocation_short_name);
+	fprintf(stderr, "usage: %s -e EXECUTE -m MIMIC [-w] [-a KEY=VALUE]\n", program_invocation_short_name);
 	fprintf(stderr, "\t-e\tCommand to EXECUTE.\n");
 	fprintf(stderr, "\t-m\tCommand to MIMIC.\n");
 	fprintf(stderr, "\t-w\tWipe mimic environment.\n");
@@ -378,13 +379,10 @@ int main(int argc, char **argv, char **envp){
 		child->saved_regs.rdx = (unsigned long) execution_header_remote + ((execute_wordexp_t.we_wordc + 1) * sizeof(char **));
 		printf("\t\t\tSuccess!\n");
 
+		printf("\n\tGood-bye and have a good luck! :)\n\n");
 
-		printf("Cleaning up...");
 CLEAN_UP:
 		ptrace_do_cleanup(child);
-		printf("\t\t\t\tSuccess!\n");
-
-		printf("\n\tGood-bye and have a good luck! :)\n\n");
 		return(0);
 
 	}else{

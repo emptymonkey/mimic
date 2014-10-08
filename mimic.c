@@ -4,7 +4,7 @@
  *	mimic
  *
  *
- *	emptymonkey's tool for covert daemon execution. 
+ *	emptymonkey's tool for covert execution. 
  *		Liar, liar, /proc on fire!
  *
  *
@@ -13,9 +13,10 @@
  *
  *	This tool runs in user-space and requires *no* elevated privileges. 
  *
- *	This tool allows a user to run any program and have it appear in the process listings as any other
- *	program. It works by altering the internal process structures in a way to confuse the /proc/PID filesystem. Tools
- *	that report process details gather that information from the /proc/PID entry for that process.
+ *	This tool allows a user to run any program on the system and have it appear in the process listings as any other
+ *	program. This is acheived by altering the internal process structures in a way that confuses the /proc
+ *	filesystem. Tools that report process details back to the user (e.g. ps, top, lsof) gather thier information from
+ *	the /proc filesystem.
  *
  *
  *	Features:
@@ -119,7 +120,7 @@ void usage(){
  **********************************************************************************************************************/
 int main(int argc, char **argv, char **envp){
 
-	unsigned int i;
+	unsigned int i, j;
 	int retval;
 
 	int opt;
@@ -137,7 +138,7 @@ int main(int argc, char **argv, char **envp){
 	char **execution_header_local;
 	void *execution_header_remote;
 
-	char **local_buffer;
+	char *local_buffer;
 	void *remote_buffer;
 
 	unsigned int execution_header_size;
@@ -170,6 +171,7 @@ int main(int argc, char **argv, char **envp){
 			if(argv[i][0] == SOH_CHAR){
 				self_exec = 1;
 				argv[i][0] = NULL_CHAR;
+				argv[i] = NULL;
 				break;
 			}
 			i++;
@@ -178,12 +180,19 @@ int main(int argc, char **argv, char **envp){
 
 	if(self_exec){
 		memset(&argc, i, 1);	
-
-		if((retval = prctl(PR_SET_NAME, argv[i + 1], NULL, NULL, NULL)) == -1){
+		i++;
+		if((retval = prctl(PR_SET_NAME, argv[i], NULL, NULL, NULL)) == -1){
 			fprintf(stderr, "prctl(PR_SET_NAME, %lx, NULL, NULL, NULL): %s\n", \
 					(unsigned long) argv[i + 1], strerror(errno));
 			exit(-1);
 		}
+
+		j = 0;
+		while(argv[i][j]){
+			argv[i][j] = NULL_CHAR;
+			j++;
+		}
+
 		wait(NULL);
 		exit(0);
 	}
@@ -274,10 +283,15 @@ int main(int argc, char **argv, char **envp){
 	mimic_argc = mimic_wordexp_t.we_wordc;
 
 
-	if((mimic_short_name = strrchr(mimic_argv[0], '/')) == NULL){
+	// XXX fix so that short name doesn't include '[' and ']'.
+	if(mimic_argv[0][0] == '['){
 		mimic_short_name = mimic_argv[0];
 	}else{
-		mimic_short_name++;
+		if((mimic_short_name = strrchr(mimic_argv[0], '/')) == NULL){
+			mimic_short_name = mimic_argv[0];
+		}else{
+			mimic_short_name++;
+		}
 	}
 
 	if(envp){
@@ -532,13 +546,6 @@ void build_execution_headers(void *local_buffer, void *base_addr, char **argv, c
 	}
 
 	tmp_len = (argc * sizeof(char *)) + (envc * sizeof(char *)) + (2 * sizeof(char *));
-	/*
-		 printf("DEBUG: beh: tmp_len: %d\n", tmp_len);
-		 printf("DEBUG: beh: local_buffer: %lx\n", (unsigned long) local_buffer);
-		 printf("DEBUG: beh: base_addr: %lx\n", (unsigned long) base_addr);
-		 printf("DEBUG: beh: argv: %lx\n", (unsigned long) argv);
-		 printf("DEBUG: beh: envp: %lx\n", (unsigned long) envp);
-	 */
 
 	pointer_ptr = (char **) local_buffer;
 	tmp_ptr_local = local_buffer + tmp_len;

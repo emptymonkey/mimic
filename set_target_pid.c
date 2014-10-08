@@ -38,8 +38,6 @@ int main(int argc, char **argv){
 
 			flag = 1;
 		}
-
-		printf("DEBUG: current: %d\n", current);
 	}
 
 	return(0);

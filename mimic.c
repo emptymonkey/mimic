@@ -283,9 +283,11 @@ int main(int argc, char **argv, char **envp){
 	mimic_argc = mimic_wordexp_t.we_wordc;
 
 
-	// XXX fix so that short name doesn't include '[' and ']'.
-	if(mimic_argv[0][0] == '['){
-		mimic_short_name = mimic_argv[0];
+	if((mimic_argv[0][0] == '[') && (mimic_argv[0][strlen(mimic_argv[0]) - 1] == ']')){
+		if((mimic_short_name = (char *) calloc(strlen(mimic_argv[0]) - 2 + 1, sizeof(char))) == NULL){
+			error(-1, errno, "calloc(%d, %d)", strlen(mimic_argv[0]) - 2 + 1, (int) sizeof(char));
+		}
+		memcpy(mimic_short_name, mimic_argv[0] + 1, strlen(mimic_argv[0]) - 2);
 	}else{
 		if((mimic_short_name = strrchr(mimic_argv[0], '/')) == NULL){
 			mimic_short_name = mimic_argv[0];
@@ -356,12 +358,24 @@ int main(int argc, char **argv, char **envp){
 		printf("\t\tSuccess!\n");
 
 
-		// XXX add error checking here.
 		printf("Politely requesting name change...");
-		local_buffer = ptrace_do_malloc(child, strlen(mimic_short_name) + 1);
+
+		if((local_buffer = ptrace_do_malloc(child, strlen(mimic_short_name) + 1)) == NULL){
+			fprintf(stderr, "ptrace_do_malloc(%lx, %d): %s\n", \
+					(unsigned long) child, strlen(mimic_short_name) + 1, \
+					strerror(errno));
+			goto CLEAN_UP;
+		}
+
 		memset(local_buffer, 0, strlen(mimic_short_name) + 1);
 		memcpy(local_buffer, mimic_short_name, strlen(mimic_short_name));
-		remote_buffer = ptrace_do_push_mem(child, local_buffer);
+
+		if((remote_buffer = ptrace_do_push_mem(child, local_buffer)) == 0){
+			fprintf(stderr, "ptrace_do_push_mem(%lx, %lx): %s\n", \
+					(unsigned long) child, (unsigned long) local_buffer, \
+					strerror(errno));
+			goto CLEAN_UP;
+		}
 
 		errno = 0;
 		ret_long = ptrace_do_syscall(child, __NR_prctl, PR_SET_NAME, (unsigned long) remote_buffer, 0, 0, 0, 0);
@@ -419,7 +433,6 @@ int main(int argc, char **argv, char **envp){
 		printf("Building execution headers...");
 		memcpy(&(child->saved_regs), &test_regs, sizeof(struct user_regs_struct));
 
-		//		execution_header_size = sizeof(unsigned long);
 		execution_header_size = get_vector_byte_count(argv);
 		execution_header_size += get_vector_byte_count(envp);
 		execution_header_size += 2 * sizeof(unsigned long);

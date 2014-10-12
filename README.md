@@ -4,7 +4,7 @@ _mimic_ is a tool for covert execution on Linux x86\_64.
 
 **What is "covert execution"?**
 
-Covert execution is the art of hiding a process. In this case, _mimic_ hides the process in plain sight. Any user can use it. It does not require special permissions. It does not require special binaries. It does not require a root kit.
+Covert execution is the art of hiding a process. In this case, _mimic_ hides the process in plain sight. _mimic_ can launch any program and make it look like any other program. Any user can use it. It does not require special permissions. It does not require special binaries. It does not require a root kit.
 
 **What?! No special privileges??**
 
@@ -13,6 +13,14 @@ That is correct. _mimic_ works by rearranging the internal structures of a proce
 **Can this be detected?!**
 
 Of course, but only if you are looking very closely, or running a forensic tool that is looking for this sort of thing. The usefulness behind _mimic_ is that it will prevent someone from becoming suspicious in the first place.
+
+**Will this work with scripts?**
+
+Yes, but you need to call mimic directly on the interpreter. For example, if the first line of your script is "#!/usr/bin/perl" then you'll want to call _mimic_ like this:
+
+	empty@monkey:~$ mimic -e "/usr/bin/perl test.pl" 
+
+By invoking the interpreter directly, mimic can work it's magic.
 
 **Who is the target audience for _mimic_?**
 

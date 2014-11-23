@@ -60,6 +60,10 @@
 #define NULL_CHAR	0x00
 
 
+#define PR_SET_MM   35
+#define PR_SET_MM_EXE_FILE  13
+
+
 
 char **wordexp_t_to_vector(wordexp_t *wordexp_t_in);
 int key_match(char **vector, char *key_value);
@@ -369,8 +373,11 @@ int main(int argc, char **argv, char **envp){
 
 	// Fork off the child.
 
-	if(!quiet)
+	if(!quiet){
 		printf("Launching child...");
+		fflush(stdout);
+	}
+
 
 	retval = fork();
 
@@ -398,30 +405,39 @@ int main(int argc, char **argv, char **envp){
 
 		child_pid = retval;
 
-	if(!quiet)
-		printf("\t\t\tSuccess!\n");
+		if(!quiet){
+			printf("\t\t\tSuccess!\n");
+		}
 
-	if(!quiet)
-		printf("Waiting for child to attach...");
+		if(!quiet){
+			printf("Waiting for child to attach...");
+			fflush(stdout);
+		}
 
 		wait(NULL);
 
-	if(!quiet)
-		printf("\t\tSuccess!\n");
+		if(!quiet){
+			printf("\t\tSuccess!\n");
+		}
 
 
-	if(!quiet)
-		printf("Initializing ptrace_do...");
+		if(!quiet){
+			printf("Initializing ptrace_do...");
+			fflush(stdout);
+		}
 		if((child = ptrace_do_init(child_pid)) == NULL){
 			fprintf(stderr, "ptrace_do_init(%d): %s\n", child_pid, strerror(errno));
 			exit(-1);
 		}
-	if(!quiet)
-		printf("\t\tSuccess!\n");
+		if(!quiet){
+			printf("\t\tSuccess!\n");
+		}
 
 
-	if(!quiet)
-		printf("Determining stack state...");
+		if(!quiet){
+			printf("Determining stack state...");
+			fflush(stdout);
+		}
 		errno = 0;
 		peektext = ptrace(PTRACE_PEEKTEXT, child->pid, child->saved_regs.rsp, NULL);
 		if(errno){
@@ -434,12 +450,15 @@ int main(int argc, char **argv, char **envp){
 		argv_stack_val = child->saved_regs.rsp + 0x8;
 		envp_stack_val = argv_stack_val + ((argc_stack_val + 1) * 0x8);
 
-	if(!quiet)
-		printf("\t\tSuccess!\n");
+		if(!quiet){
+			printf("\t\tSuccess!\n");
+		}
 
 
-	if(!quiet)
-		printf("Politely requesting name change...");
+		if(!quiet){
+			printf("Politely requesting name change...");
+			fflush(stdout);
+		}
 		if((local_buffer = ptrace_do_malloc(child, strlen(mimic_short_name) + 1)) == NULL){
 			fprintf(stderr, "ptrace_do_malloc(%lx, %d): %s\n", \
 					(unsigned long) child, (int) (strlen(mimic_short_name) + 1), \
@@ -471,17 +490,22 @@ int main(int argc, char **argv, char **envp){
 					strerror(-ret_long));
 			goto CLEAN_UP;
 		}
-	if(!quiet)
-		printf("\tSuccess!\n");
+		if(!quiet){
+			printf("\tSuccess!\n");
+		}
 
 
-	if(!quiet)
-		printf("Searching for main()...");
+		if(!quiet){
+			printf("Searching for main()...");
+			fflush(stdout);
+		}
 		memcpy(&test_regs, &(child->saved_regs), sizeof(struct user_regs_struct));
 
 		// This while loop test represents the state of the registers upon entry into the main() function 
 		// after a proper libc initialization. This is the heuristic we will use to determine if we are in
 		// the proper place to work our mimic magic! 
+
+		// Note: removed the check for $rcx here because on some platforms libc hasn't cleared it out. 
 		while( ! \
 				( \
 					(test_regs.rdi == argc_stack_val) && \
@@ -490,7 +514,6 @@ int main(int argc, char **argv, char **envp){
 					(test_regs.rip > child->map_head->start_address) && \
 					(test_regs.rip <  child->map_head->end_address) && \
 					(test_regs.rbp == 0) && \
-					(test_regs.rcx == 0) && \
 					(test_regs.rbx == 0) \
 				)){
 
@@ -520,8 +543,9 @@ int main(int argc, char **argv, char **envp){
 			fprintf(stderr, "Error: libc register setup not detected. Aborting!\n");
 			goto CLEAN_UP;
 		}
-	if(!quiet)
-		printf("\t\t\tSuccess!\n");
+		if(!quiet){
+			printf("\t\t\tSuccess!\n");
+		}
 
 
 		// We use the term "execution headers" to refer to the solid chunk of memory that contains
@@ -529,8 +553,10 @@ int main(int argc, char **argv, char **envp){
 		// Once it has been set up, the pointers inside will be consistantly self-referential, for
 		// the address space of the child process. That will allow us to simply push the memory 
 		// chunk over and detatch.
-	if(!quiet)
-		printf("Building execution headers...");
+		if(!quiet){
+			printf("Building execution headers...");
+			fflush(stdout);
+		}
 		memcpy(&(child->saved_regs), &test_regs, sizeof(struct user_regs_struct));
 
 		execution_header_size = get_vector_byte_count(argv);
@@ -562,20 +588,25 @@ int main(int argc, char **argv, char **envp){
 		}
 
 		ptrace_do_free(child, execution_header_local, FREE_LOCAL);
-	if(!quiet)
-		printf("\t\tSuccess!\n");
+		if(!quiet){
+			printf("\t\tSuccess!\n");
+		}
 
 
-	if(!quiet)
-		printf("Setting up final state...");
+		if(!quiet){
+			printf("Setting up final state...");
+			fflush(stdout);
+		}
 		child->saved_regs.rdi = execute_argc;
 		child->saved_regs.rsi = (unsigned long) execution_header_remote;
 		child->saved_regs.rdx = (unsigned long) execution_header_remote + ((execute_argc + 1) * sizeof(char **));
-	if(!quiet)
-		printf("\t\tSuccess!\n");
+		if(!quiet){
+			printf("\t\tSuccess!\n");
+		}
 
-	if(!quiet)
-		printf("\n\tGood-bye and have a good luck! :)\n\n");
+		if(!quiet){
+			printf("\n\tGood-bye and have a good luck! :)\n\n");
+		}
 
 
 CLEAN_UP:

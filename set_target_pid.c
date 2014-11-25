@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <error.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -29,13 +30,33 @@
 #include <stdlib.h>
 
 
-// Some versions of Linux seem to have a "max fork()s for a process".
-// I can't find exactly where this is set, so for now, here is a 
-// TUNABLE constant that can be used to control how often the parent dies.
-// Fork() then killing parent is very processer intensive. Fork() then
-// killing child is not. So, kill as many children as TUNABLE allows,
-// then kill the parent to reset the OS max fork() per proc count.
-#define TUNEABLE 1000
+/*
+ * The strategy here is to have an original parent process that holds the foreground for the user.
+ * There will then be a loop parent, who is the child of the original parent. The loop parent is
+ * responsible for fork()ing children and tracking state. Those children immediately exit.
+ *
+ * Child death is fairly lightweight. Parent death is not. This is why we but the burden of death
+ * on the children and not the parents.
+ * 
+ * Unfortunately, some systems seem to have a "maximum number of forks per process" of some
+ * sort. Because of this, the loop parent will only spawn off MAX_FORKS number of children before
+ * killing itself and letting the next child become the new loop parent (thus resetting the max
+ * forks possible). 
+ *
+ * Until I find a way of determining this setting dynamically at runtime, it is for now a CPP #define.
+ *
+ */
+
+#define MAX_FORKS	1000
+
+
+
+int sig_found;
+
+void signal_handler(int signal){
+  sig_found = signal;
+}
+
 
 
 int main(int argc, char **argv){
@@ -49,6 +70,9 @@ int main(int argc, char **argv){
 	int pid_max_fd;
 	pid_t pid_max;
 	
+	pid_t original_parent;
+
+	struct sigaction act;
 
 
 	if((short_name = strrchr(argv[0], '/')) == NULL){
@@ -60,7 +84,7 @@ int main(int argc, char **argv){
 
 	if(argc != 2){
 		fprintf(stderr, "\n%s usage: %s TARGET\n", short_name, argv[0]);
-		fprintf(stderr, "\tFork-kills children until TARGET pid is reached. Happily loops through pid rollover.\n\n");
+		fprintf(stderr, "\tFork proceses until TARGET pid is reached. Happily loops through pid rollover.\n\n");
 		exit(-1);
 	}
 
@@ -78,8 +102,34 @@ int main(int argc, char **argv){
 
 	target = (pid_t) strtol(argv[1], NULL, 10);
 
+	// The target the user is asking for should be the next pid available for them. Let's decrement
+	// target now, so we don't step on it later.
+	target--;
+
 	if(target > pid_max){
 		error(-1, 0, "error: target is greater than pid_max! Quitting.");
+	}
+
+	sig_found = 0;
+	memset(&act, 0, sizeof(act));
+	act.sa_handler = signal_handler;
+
+	if(sigaction(SIGUSR1, &act, NULL) == -1){
+		error(-1, errno, "sigaction(%d, %p, NULL)", SIGUSR1, &act);
+	}
+
+	original_parent = getpid();
+
+	if((current = fork()) == -1){
+		error(-1, errno, "fork()");
+	}else if(current){
+		pause();
+		
+		if(sig_found == SIGUSR1){
+			exit(0);
+		}else{
+			error(-1, errno, "pause()");
+		}
 	}
 
 	flag = 0;
@@ -94,12 +144,12 @@ int main(int argc, char **argv){
 	while((flag && (current < target)) || (!flag && (target < current))){
 
 		last = current;
-		if(count == TUNEABLE){
+		if(count == MAX_FORKS){
 
 			if((current = fork()) == -1){
-				exit(-1);
+				error(-1, errno, "fork()");
 			}else if(current){
-				exit(0);
+				exit(1);
 			}
 
 			count = 0;
@@ -108,7 +158,7 @@ int main(int argc, char **argv){
 		}else{
 
 			if(!(current = fork())){
-				exit(-1);
+				exit(2);
 			}
 
 		}
@@ -124,6 +174,8 @@ int main(int argc, char **argv){
 
 		count++;
 	}
+
+	kill(original_parent, SIGUSR1);
 
 	return(0);
 }

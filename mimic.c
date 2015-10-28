@@ -99,6 +99,7 @@ void usage(){
 	fprintf(stderr, "\t\t\tDefault for root is:\t\t\"%s\"\n", DEFAULT_ROOT_MIMIC);
 	fprintf(stderr, "\t-b\tLaunch COMMAND in the background.\n");
 	fprintf(stderr, "\t-a\tAdd / overwrite KEY to the mimic environment with associated VALUE.\n");
+	fprintf(stderr, "\t-r\tRaw mimic string. Do not process it in the normal way. (Useful for name fuzzing / mangling.)\n");
 	fprintf(stderr, "\t-q\tBe quiet! Do not print normal output.\n");
 	fprintf(stderr, "\t-h\tPrint this helpful message.\n");
 	fprintf(stderr, "\n\tNotes:\n");
@@ -170,6 +171,7 @@ int main(int argc, char **argv, char **envp){
 	int execute_argc, mimic_argc;
 	char **mimic_envp;
 	int mimic_envc = 0;
+	int raw_mimic = 0;
 
 	int child_pid;
 	struct ptrace_do *child;
@@ -272,7 +274,7 @@ int main(int argc, char **argv, char **envp){
 	// Now reset the getopt() loop and actually handle the options.
 	optind = 1;
 	opterr = 1;
-	while ((opt = getopt(argc, argv, "e:m:wa:bqh")) != -1) {
+	while ((opt = getopt(argc, argv, "e:m:wa:brqh")) != -1) {
 
 		switch (opt) {
 			case 'e':
@@ -291,6 +293,10 @@ int main(int argc, char **argv, char **envp){
 				if(!key_match(mimic_envp, optarg)){
 					mimic_envp[mimic_envc++] = optarg;
 				}
+				break;
+
+			case 'r':
+				raw_mimic = 1;
 				break;
 
 			case 'q':
@@ -327,26 +333,54 @@ int main(int argc, char **argv, char **envp){
 	}
 	execute_argc = execute_wordexp_t.we_wordc;
 
-	if(wordexp(mimic_string, &mimic_wordexp_t, 0)){
-		error(-1, errno, "wordexp(%s, %lx, 0)", mimic_string, (unsigned long) &mimic_wordexp_t);
-	}
+	/*
+		 Occasionally you'll want to ensure that mimic is just an unparsed raw string. Thi is useful
+		 when performing a directory traversal or file overwrite attack against a proc aware service.
+		 E.g. mimic_string: "../../.."
+	*/
+	if(raw_mimic){
+		if((mimic_argv = calloc(2, sizeof(char *))) == NULL){
+			error(-1, errno, "calloc(2, %d)", (int) sizeof(char *));
+		}
 
-	if((mimic_argv = wordexp_t_to_vector(&mimic_wordexp_t)) == NULL){
-		error(-1, errno, "wordexp_t_to_vector(%lx)", (unsigned long) &mimic_wordexp_t);
+		tmp_size = strlen(mimic_string);
+		if((mimic_argv[0] = calloc(tmp_size + 1, sizeof(char))) == NULL){
+			error(-1, errno, "calloc(%d, %d)", tmp_size + 1, (int) sizeof(char));
+		}
+		memcpy(mimic_argv[0], mimic_string, tmp_size);
+		mimic_argc = 1;
+
+	}else{
+	
+		if(wordexp(mimic_string, &mimic_wordexp_t, 0)){
+			error(-1, errno, "wordexp(%s, %lx, 0)", mimic_string, (unsigned long) &mimic_wordexp_t);
+		}
+
+		if((mimic_argv = wordexp_t_to_vector(&mimic_wordexp_t)) == NULL){
+			error(-1, errno, "wordexp_t_to_vector(%lx)", (unsigned long) &mimic_wordexp_t);
+		}
+		mimic_argc = mimic_wordexp_t.we_wordc;
 	}
-	mimic_argc = mimic_wordexp_t.we_wordc;
 
 	// Grab the mimic short name, which is needed for proper reporting in /proc/PID/stat .
-	if((mimic_argv[0][0] == '[') && (mimic_argv[0][strlen(mimic_argv[0]) - 1] == ']')){
-		if((mimic_short_name = (char *) calloc(strlen(mimic_argv[0]) - 2 + 1, sizeof(char))) == NULL){
-			error(-1, errno, "calloc(%d, %d)", (int) (strlen(mimic_argv[0]) - 2 + 1), (int) sizeof(char));
+	if(raw_mimic){
+		tmp_size = strlen(mimic_argv[0]);
+		if((mimic_short_name = (char *) calloc(tmp_size + 1, sizeof(char))) == NULL){
+			error(-1, errno, "calloc(%d, %d)", tmp_size + 1, (int) sizeof(char));
 		}
-		memcpy(mimic_short_name, mimic_argv[0] + 1, strlen(mimic_argv[0]) - 2);
+		memcpy(mimic_short_name, mimic_argv[0], tmp_size);
 	}else{
-		if((mimic_short_name = strrchr(mimic_argv[0], '/')) == NULL){
-			mimic_short_name = mimic_argv[0];
+		if((mimic_argv[0][0] == '[') && (mimic_argv[0][strlen(mimic_argv[0]) - 1] == ']')){
+			if((mimic_short_name = (char *) calloc(strlen(mimic_argv[0]) - 2 + 1, sizeof(char))) == NULL){
+				error(-1, errno, "calloc(%d, %d)", (int) (strlen(mimic_argv[0]) - 2 + 1), (int) sizeof(char));
+			}
+			memcpy(mimic_short_name, mimic_argv[0] + 1, strlen(mimic_argv[0]) - 2);
 		}else{
-			mimic_short_name++;
+			if((mimic_short_name = strrchr(mimic_argv[0], '/')) == NULL){
+				mimic_short_name = mimic_argv[0];
+			}else{
+				mimic_short_name++;
+			}
 		}
 	}
 

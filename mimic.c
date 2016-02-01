@@ -538,8 +538,6 @@ int main(int argc, char **argv, char **envp){
 		// This while loop test represents the state of the registers upon entry into the main() function 
 		// after a proper libc initialization. This is the heuristic we will use to determine if we are in
 		// the proper place to work our mimic magic! 
-
-		// Note: removed the check for $rcx here because on some platforms libc hasn't cleared it out. 
 		while( ! \
 				( \
 					(test_regs.rdi == argc_stack_val) && \

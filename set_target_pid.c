@@ -35,7 +35,7 @@
  * There will then be a loop parent, who is the child of the original parent. The loop parent is
  * responsible for fork()ing children and tracking state. Those children immediately exit.
  *
- * Child death is fairly lightweight. Parent death is not. This is why we but the burden of death
+ * Child death is fairly lightweight. Parent death is not. This is why we put the burden of death
  * on the children and not the parents.
  * 
  * Unfortunately, some systems seem to have a "maximum number of forks per process" of some

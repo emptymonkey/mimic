@@ -546,9 +546,6 @@ int main(int argc, char **argv, char **envp){
 					(test_regs.rip > child->map_head->start_address) && \
 					(test_regs.rip <  child->map_head->end_address) && \
 					(test_regs.rax == test_regs.rip)
-/*
-					((test_regs.rbp == 0) || (test_regs.rbp == 0x6b4170)) \
-*/
 				)){
 
 			if((ret_long = ptrace(PTRACE_SINGLESTEP, child->pid, NULL, NULL)) == -1){

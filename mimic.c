@@ -100,7 +100,8 @@ void usage(){
 	fprintf(stderr, "\t-b\tLaunch COMMAND in the background.\n");
 	fprintf(stderr, "\t-a\tAdd / overwrite KEY to the mimic environment with associated VALUE.\n");
 	fprintf(stderr, "\t-r\tRaw mimic string. Do not process it in the normal way. (Useful for name fuzzing / mangling.)\n");
-	fprintf(stderr, "\t-q\tBe quiet! Do not print normal output.\n");
+ 	fprintf(stderr, "\t-q\tBe quiet!	(Default.)\n");
+ 	fprintf(stderr, "\t-v\tBe loud!\n");
 	fprintf(stderr, "\t-h\tPrint this helpful message.\n");
 	fprintf(stderr, "\n\tNotes:\n");
 	fprintf(stderr, "\t\tThe MIMIC environment will be a copy of the COMMAND environment.\n");
@@ -205,7 +206,8 @@ int main(int argc, char **argv, char **envp){
 
 	char *mimic_short_name;
 
-	int quiet = 0;
+	// Default to non-verbose, quiet output.
+	int quiet = 1;
 
 
 	// Before going forward, we need to figure out if this is the initial launch, or the re-exec we 
@@ -258,7 +260,7 @@ int main(int argc, char **argv, char **envp){
 
 	// Step through the args once just to estimate the incoming size of the new environment variables.
 	opterr = 0;
-	while ((opt = getopt(argc, argv, "e:m:wa:bqh")) != -1) {
+	while ((opt = getopt(argc, argv, "e:m:wa:bqvh")) != -1) {
 		switch (opt) {
 			case 'a':
 				tmp_size += strlen(optarg) + 1;
@@ -274,7 +276,7 @@ int main(int argc, char **argv, char **envp){
 	// Now reset the getopt() loop and actually handle the options.
 	optind = 1;
 	opterr = 1;
-	while ((opt = getopt(argc, argv, "e:m:wa:brqh")) != -1) {
+	while ((opt = getopt(argc, argv, "e:m:wa:brqvh")) != -1) {
 
 		switch (opt) {
 			case 'e':
@@ -301,6 +303,10 @@ int main(int argc, char **argv, char **envp){
 
 			case 'q':
 				quiet = 1;
+				break;
+
+			case 'v':
+				quiet = 0;
 				break;
 
 			case 'h':

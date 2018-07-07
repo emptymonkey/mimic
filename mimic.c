@@ -27,6 +27,8 @@
  *
  **********************************************************************************************************************/
 
+#define DEFAULT_EXECUTE_STRING	"/bin/bash"
+
 
 #define _GNU_SOURCE
 
@@ -166,7 +168,9 @@ int main(int argc, char **argv, char **envp){
 
 	int opt;
 
-	char *execute_string = NULL, *mimic_string = NULL;
+	char *execute_string = DEFAULT_EXECUTE_STRING;
+
+	char *mimic_string = NULL;
 	wordexp_t execute_wordexp_t, mimic_wordexp_t;
 	char **execute_argv, **mimic_argv;
 	int execute_argc, mimic_argc;
@@ -340,7 +344,7 @@ int main(int argc, char **argv, char **envp){
 	execute_argc = execute_wordexp_t.we_wordc;
 
 	/*
-		 Occasionally you'll want to ensure that mimic is just an unparsed raw string. Thi is useful
+		 Occasionally you'll want to ensure that mimic is just an unparsed raw string. This is useful
 		 when performing a directory traversal or file overwrite attack against a proc aware service.
 		 E.g. mimic_string: "../../.."
 	*/

@@ -41,6 +41,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <wordexp.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -99,7 +100,8 @@ void usage(){
 	fprintf(stderr, "\t-m\tSetup COMMAND to look like MIMIC.\n");
 	fprintf(stderr, "\t\t\tDefault for non-root is:\t\"%s\"\n", DEFAULT_MIMIC);
 	fprintf(stderr, "\t\t\tDefault for root is:\t\t\"%s\"\n", DEFAULT_ROOT_MIMIC);
-	fprintf(stderr, "\t-b\tLaunch COMMAND in the background.\n");
+	fprintf(stderr, "\t-b\tLaunch COMMAND in the background (but keep the tty).\n");
+	fprintf(stderr, "\t-d\tLaunch COMMAND as a daemon (and disconnect from the tty).\n");
 	fprintf(stderr, "\t-a\tAdd / overwrite KEY to the mimic environment with associated VALUE.\n");
 	fprintf(stderr, "\t-r\tRaw mimic string. Do not process it in the normal way. (Useful for name fuzzing / mangling.)\n");
  	fprintf(stderr, "\t-q\tBe quiet!	(Default.)\n");
@@ -200,6 +202,7 @@ int main(int argc, char **argv, char **envp){
 	struct user_regs_struct test_regs;
 
 	int background = 0;
+	int daemonize = 0;
 
 	int self_exec = 0;
 
@@ -264,7 +267,7 @@ int main(int argc, char **argv, char **envp){
 
 	// Step through the args once just to estimate the incoming size of the new environment variables.
 	opterr = 0;
-	while ((opt = getopt(argc, argv, "e:m:wa:bqvh")) != -1) {
+	while ((opt = getopt(argc, argv, "e:m:wa:bdqvh")) != -1) {
 		switch (opt) {
 			case 'a':
 				tmp_size += strlen(optarg) + 1;
@@ -280,7 +283,7 @@ int main(int argc, char **argv, char **envp){
 	// Now reset the getopt() loop and actually handle the options.
 	optind = 1;
 	opterr = 1;
-	while ((opt = getopt(argc, argv, "e:m:wa:brqvh")) != -1) {
+	while ((opt = getopt(argc, argv, "e:m:wa:bdrqvh")) != -1) {
 
 		switch (opt) {
 			case 'e':
@@ -293,6 +296,10 @@ int main(int argc, char **argv, char **envp){
 
 			case 'b':
 				background = 1;
+				break;
+
+			case 'd':
+				daemonize = 1;
 				break;
 
 			case 'a':
@@ -413,6 +420,35 @@ int main(int argc, char **argv, char **envp){
 			}
 			i++;
 		}
+	}
+
+	// Become a daemon, if asked by our user.
+	if(daemonize){
+		if(!quiet){
+			printf("Disconnecting from the tty and becoming a daemon now.\n");
+			fflush(stdout);
+			quiet = 1;
+		}
+
+		retval = fork();
+		if(retval == -1){
+			error(-1, errno, "daemon fork()");
+		}else if(retval){
+			exit(0);
+		}
+
+		if(chdir("/") == -1){
+			error(-1, errno, "chdir(\"/\")");
+		}
+
+		if(setsid() == -1){
+			error(-1, errno, "setsid()");
+		}
+
+		close(STDIN_FILENO);
+		close(STDOUT_FILENO);
+		close(STDERR_FILENO);
+
 	}
 
 	// Fork off the child.
@@ -655,6 +691,7 @@ CLEAN_UP:
 
 
 		// Handle the case where we need to hang around and reserve the foreground slot for the child.
+		// Note, this is the default case. Not handling this and dropping through to the return() below is the '-b' case.
 		if(!background){
 
 			soh_string[0] = SOH_CHAR;
@@ -664,7 +701,7 @@ CLEAN_UP:
 			//  -> mimic_argc + 3
 			if((foreground_mimic_argv = (char **) calloc(mimic_argc + 3, sizeof(char **))) == NULL){
 				fprintf(stderr, "calloc(%d, %d): %s\n", \
-						tmp_size, (int) sizeof(char), strerror(errno));
+						mimic_argc + 3, (int) sizeof(char), strerror(errno));
 				exit(-1);
 			}
 
